@@ -64,6 +64,7 @@ namespace AugurWorkspace
 		public MainForm()
 		{
 			InitializeComponent();
+			this.Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!);
 			EnableDarkTitleBar();
 
 			this.Text = "Augur Workspace";
