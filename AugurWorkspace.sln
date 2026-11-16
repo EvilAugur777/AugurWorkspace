@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35806.99 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AugurWorkspace", "AugurWorkspace\AugurWorkspace.csproj", "{0043D4DE-B21B-40A0-BCA2-CC775CA63BBD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{0043D4DE-B21B-40A0-BCA2-CC775CA63BBD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0043D4DE-B21B-40A0-BCA2-CC775CA63BBD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0043D4DE-B21B-40A0-BCA2-CC775CA63BBD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0043D4DE-B21B-40A0-BCA2-CC775CA63BBD}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {217475F8-3633-475B-845A-23560ED52BCE}
+	EndGlobalSection
+EndGlobal
