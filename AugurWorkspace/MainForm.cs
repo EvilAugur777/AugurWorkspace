@@ -61,11 +61,40 @@ namespace AugurWorkspace
 		private static readonly Color BgHoverBright = Color.FromArgb(228, 230, 235);
 		private static readonly Color TextDarkHover = Color.FromArgb(18, 19, 22);
 
+		private static void ApplyDarkTitleBar(IntPtr handle)
+		{
+			try
+			{
+				int dark = 1;
+				DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+			}
+			catch { }
+		}
+
+		private static ContextMenuStrip CreateDarkContextMenu()
+		{
+			var ctx = new ContextMenuStrip
+			{
+				Renderer = new DarkMenuRenderer(),
+				BackColor = BgSidebar,
+				ForeColor = Color.Gainsboro,
+				ShowImageMargin = false
+			};
+			return ctx;
+		}
+
+
 		public MainForm()
 		{
 			InitializeComponent();
 			this.Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!);
-			EnableDarkTitleBar();
+			ApplyDarkTitleBar(this.Handle);
+
+			// Добавляем браузерный User-Agent для стабильной загрузки исошек
+			if (_httpClient.DefaultRequestHeaders.UserAgent.Count == 0)
+			{
+				_httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+			}
 
 			this.Text = "Augur Workspace";
 			this.Size = new Size(1360, 820);
@@ -78,6 +107,48 @@ namespace AugurWorkspace
 			BuildUI();
 			ShowLauncher();
 		}
+
+		private static (string normalizedTarget, bool isLocalApp) NormalizeTarget(string rawInput)
+		{
+			string clean = rawInput.Trim().Trim('"');
+			if (string.IsNullOrWhiteSpace(clean))
+				return (clean, false);
+
+			// 1. Если протокол уже указан — это точно веб-ссылка
+			if (clean.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+				clean.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+			{
+				return (clean, false);
+			}
+
+			// 2. Если есть слэши Windows (\), буква диска (C:) или известное расширение файла — это локальный файл
+			bool looksLikeFile = clean.Contains('\\') ||
+								 System.Text.RegularExpressions.Regex.IsMatch(clean, @"^[a-zA-Z]:") ||
+								 System.Text.RegularExpressions.Regex.IsMatch(clean, @"\.(exe|bat|cmd|msi|xlsx?|docx?|pdf|txt|ahk|ps1|vbs|lnk)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+			if (looksLikeFile)
+			{
+				return (clean, true);
+			}
+
+			// 3. Если похоже на домен (://google.com, poe.ninja), localhost или IP-адрес — подставляем протокол
+			bool looksLikeDomain = System.Text.RegularExpressions.Regex.IsMatch(
+				clean,
+				@"^(localhost(:\d+)?|(\d{1,3}\.){3}\d{1,3}(:\d+)?|([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(:\d+)?(/.*)?$"
+			);
+
+			if (looksLikeDomain)
+			{
+				string scheme = clean.StartsWith("localhost", StringComparison.OrdinalIgnoreCase) ||
+								System.Text.RegularExpressions.Regex.IsMatch(clean, @"^(\d{1,3}\.){3}\d{1,3}")
+								? "http://" : "https://";
+				return (scheme + clean, false);
+			}
+
+			// Всё остальное (например, короткие команды) считаем локальным запуском
+			return (clean, true);
+		}
+
 
 		private void EnableDarkTitleBar()
 		{
@@ -367,6 +438,13 @@ namespace AugurWorkspace
 				}
 			};
 
+			var addrCtx = CreateDarkContextMenu();
+			addrCtx.Items.Add("Копировать", null, (s, e) => { if (!string.IsNullOrEmpty(_addressBar.Text)) Clipboard.SetText(_addressBar.Text); });
+			addrCtx.Items.Add("Вставить", null, (s, e) => { if (Clipboard.ContainsText()) _addressBar.SelectedText = Clipboard.GetText(); });
+			addrCtx.Items.Add("Выделить всё", null, (s, e) => _addressBar.SelectAll());
+			_addressBar.ContextMenuStrip = addrCtx;
+
+
 			var spacer1 = new Panel { Width = 8, Dock = DockStyle.Right, BackColor = Color.Transparent };
 			var spacer2 = new Panel { Width = 4, Dock = DockStyle.Right, BackColor = Color.Transparent };
 
@@ -432,7 +510,7 @@ namespace AugurWorkspace
 				card.Click += async (s, e) => await SwitchProfileAsync(profName);
 
 				// Контекстное меню по правой кнопке мыши на карточку профиля
-				var ctx = new ContextMenuStrip();
+				var ctx = CreateDarkContextMenu();
 				ctx.Items.Add("Переименовать профиль", null, (s, e) => RenameProfile(profName));
 				ctx.Items.Add(new ToolStripSeparator());
 				ctx.Items.Add("Удалить профиль", null, (s, e) => DeleteProfile(profName));
@@ -521,56 +599,101 @@ namespace AugurWorkspace
 		private Image LoadOrCreateBookmarkIcon(BookmarkItem item)
 		{
 			string cachedPath = GetFaviconCachePath(item);
-			if (File.Exists(cachedPath))
+			if (File.Exists(cachedPath) && new FileInfo(cachedPath).Length > 50)
 			{
 				try
 				{
-					// Читаем через байты в память, чтобы не блокировать файл на диске
 					byte[] bytes = File.ReadAllBytes(cachedPath);
 					using var ms = new MemoryStream(bytes);
-					return new Bitmap(ms);
+					using var tempBmp = new Bitmap(ms);
+					return new Bitmap(tempBmp); // Копируем в независимый Bitmap
 				}
 				catch { }
 			}
 
-			// Если это локальный .exe или файл — вытаскиваем системную иконку и сохраняем в кэш
-			if (item.IsLocalApp && File.Exists(item.Target))
+			// 1. Для локальных программ (исправлено сохранение GDI+)
+			if (item.IsLocalApp)
 			{
-				try
+				string resolvedPath = item.Target.Trim().Trim('"');
+				if (!File.Exists(resolvedPath))
 				{
-					using var ico = Icon.ExtractAssociatedIcon(item.Target);
-					if (ico != null)
-					{
-						var bmpApp = ico.ToBitmap();
-						bmpApp.Save(cachedPath, System.Drawing.Imaging.ImageFormat.Png);
-						return bmpApp;
-					}
+					string sys32 = Path.Combine(Environment.SystemDirectory, resolvedPath);
+					string winDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), resolvedPath);
+					if (File.Exists(sys32)) resolvedPath = sys32;
+					else if (File.Exists(winDir)) resolvedPath = winDir;
 				}
-				catch { }
-			}
-			else if (!item.IsLocalApp && Uri.TryCreate(item.Target, UriKind.Absolute, out var uri))
-			{
-				// Если иконки сайта еще нет на диске — тихо скачиваем её в фоне без открытия вкладки
-				_ = Task.Run(async () =>
+
+				if (File.Exists(resolvedPath))
 				{
 					try
 					{
-						string faviconUrl = $"https://google.com{uri.Host}&sz=64";
-						byte[] data = await _httpClient.GetByteArrayAsync(faviconUrl);
-						if (data.Length > 0)
+						using var ico = Icon.ExtractAssociatedIcon(resolvedPath);
+						if (ico != null)
 						{
-							await File.WriteAllBytesAsync(cachedPath, data);
-							this.Invoke(() =>
-							{
-								if (_sidebarIcons.TryGetValue(item.Id, out var picBox) && !picBox.IsDisposed)
-								{
-									using var ms = new MemoryStream(data);
-									picBox.Image = new Bitmap(ms);
-								}
-							});
+							using var rawBmp = ico.ToBitmap();
+							var cleanBmp = new Bitmap(rawBmp); // Разрываем связь с ресурсом Win32
+
+							using var ms = new MemoryStream();
+							cleanBmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+							File.WriteAllBytes(cachedPath, ms.ToArray());
+
+							return cleanBmp;
 						}
 					}
 					catch { }
+				}
+			}
+			// 2. Для веб-сайтов: фоновая загрузка по 4 источникам
+			else if (!item.IsLocalApp && Uri.TryCreate(item.Target, UriKind.Absolute, out var uri))
+			{
+				_ = Task.Run(async () =>
+				{
+					byte[]? data = null;
+					string[] sources =
+					{
+				$"https://yandex.net{uri.Host}?size=32",
+				$"https://google.com{uri.Host}&sz=64",
+				$"https://duckduckgo.com{uri.Host}.ico",
+				$"{uri.Scheme}://{uri.Host}/favicon.ico"
+			};
+
+					foreach (var src in sources)
+					{
+						try
+						{
+							var downloaded = await _httpClient.GetByteArrayAsync(src);
+							if (downloaded.Length > 50)
+							{
+								using var testMs = new MemoryStream(downloaded);
+								using var testBmp = new Bitmap(testMs);
+								data = downloaded;
+								break;
+							}
+						}
+						catch { }
+					}
+
+					if (data != null)
+					{
+						try
+						{
+							await File.WriteAllBytesAsync(cachedPath, data);
+							if (!this.IsDisposed && this.IsHandleCreated)
+							{
+								this.Invoke(() =>
+								{
+									if (_sidebarIcons.TryGetValue(item.Id, out var picBox) && !picBox.IsDisposed)
+									{
+										using var ms = new MemoryStream(data);
+										using var tempBmp = new Bitmap(ms);
+										picBox.Image = new Bitmap(tempBmp);
+										picBox.Refresh();
+									}
+								});
+							}
+						}
+						catch { }
+					}
 				});
 			}
 
@@ -589,6 +712,8 @@ namespace AugurWorkspace
 			}
 			return bmp;
 		}
+
+
 
 		private void RenderSidebarBookmarks()
 		{
@@ -661,7 +786,7 @@ namespace AugurWorkspace
 					}
 				};
 				// Контекстное меню
-				var ctx = new ContextMenuStrip();
+				var ctx = CreateDarkContextMenu();
 				ctx.Items.Add("Редактировать (название и ссылка)", null, (s, e) => EditBookmark(item));
 				if (!item.IsLocalApp)
 				{
@@ -826,26 +951,101 @@ namespace AugurWorkspace
 				webView = new WebView2 { Dock = DockStyle.Fill };
 				_contentPanel.Controls.Add(webView);
 				await webView.EnsureCoreWebView2Async(_webEnv);
-				// Автоматическое подтягивание и кэширование иконки сайта (Favicon) как в Chrome
+				webView.CoreWebView2.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Dark;
+				// Подхватываем и сохраняем иконку сайта напрямую из открытой вкладки WebView2
 				webView.CoreWebView2.FaviconChanged += async (s, e) =>
 				{
 					try
 					{
+						byte[]? iconBytes = null;
 						using var stream = await webView.CoreWebView2.GetFaviconAsync(CoreWebView2FaviconImageFormat.Png);
-						if (stream != null && stream.Length > 0)
+						if (stream != null && stream.Length > 50)
+						{
+							using var ms = new MemoryStream();
+							await stream.CopyToAsync(ms);
+							iconBytes = ms.ToArray();
+						}
+
+						// Проверяем, читается ли картинка в Bitmap (если сайт отдал SVG — сработает catch и пойдёт рендер через Google)
+						Bitmap? cleanBmp = null;
+						if (iconBytes != null && iconBytes.Length > 50)
+						{
+							try
+							{
+								using var checkMs = new MemoryStream(iconBytes);
+								using var tempBmp = new Bitmap(checkMs);
+								cleanBmp = new Bitmap(tempBmp);
+							}
+							catch
+							{
+								iconBytes = null;
+							}
+						}
+
+						// Если WebView2 отдал пустоту или нечитаемый SVG — забираем готовый PNG через Google API по домену
+						if (cleanBmp == null && Uri.TryCreate(item.Target, UriKind.Absolute, out var uri))
+						{
+							string fallbackUrl = $"https://google.com{Uri.EscapeDataString($"{uri.Scheme}://{uri.Host}")}";
+							iconBytes = await _httpClient.GetByteArrayAsync(fallbackUrl);
+							using var checkMs = new MemoryStream(iconBytes);
+							using var tempBmp = new Bitmap(checkMs);
+							cleanBmp = new Bitmap(tempBmp);
+						}
+
+						if (cleanBmp != null && iconBytes != null)
 						{
 							string cachePath = GetFaviconCachePath(item);
-							using (var fileStream = File.Create(cachePath))
+							await File.WriteAllBytesAsync(cachePath, iconBytes);
+
+							if (_sidebarIcons.TryGetValue(item.Id, out var picBox) && !picBox.IsDisposed)
 							{
-								await stream.CopyToAsync(fileStream);
-							}
-							if (_sidebarIcons.TryGetValue(item.Id, out var picBox))
-							{
-								picBox.Image = LoadOrCreateBookmarkIcon(item);
+								picBox.Image = cleanBmp;
+								picBox.Refresh();
 							}
 						}
 					}
 					catch { }
+				};
+
+				// Автоматическое подтягивание и кэширование иконки сайта (Favicon) как в Chrome
+				webView.CoreWebView2.NewWindowRequested += async (s, e) =>
+				{
+					var deferral = e.GetDeferral();
+
+					var popupForm = new Form
+					{
+						Text = "Augur Workspace — Просмотр",
+						Size = new Size(1200, 800),
+						StartPosition = FormStartPosition.CenterParent,
+						BackColor = BgWindow,
+						Icon = this.Icon
+					};
+
+					try
+					{
+						int dark = 1;
+						DwmSetWindowAttribute(popupForm.Handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+					}
+					catch { }
+
+					var popupWebView = new WebView2 { Dock = DockStyle.Fill };
+					popupForm.Controls.Add(popupWebView);
+					popupForm.FormClosed += (_, _) => popupWebView.Dispose();
+
+					// Показываем окно, чтобы у контрола создался Handle для WebView2
+					popupForm.Show();
+
+					// Инициализируем движок сразу без ожидания события Load
+					await popupWebView.EnsureCoreWebView2Async(_webEnv);
+
+					popupWebView.CoreWebView2.DocumentTitleChanged += (_, _) =>
+					{
+						if (!popupForm.IsDisposed)
+							popupForm.Text = $"{popupWebView.CoreWebView2.DocumentTitle} — Augur Workspace";
+					};
+
+					e.NewWindow = popupWebView.CoreWebView2;
+					deferral.Complete();
 				};
 				webView.CoreWebView2.SourceChanged += (s, e) =>
 				{
@@ -1105,12 +1305,11 @@ namespace AugurWorkspace
 			if (_currentProfile == null) return;
 			var res = PromptBookmark("Новая закладка", "Новая закладка", "https://");
 			if (res == null) return;
-			bool isLocal = !res.Value.target.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-			!res.Value.target.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+			var (normalized, isLocal) = NormalizeTarget(res.Value.target);
 			_currentProfile.Bookmarks.Add(new BookmarkItem
 			{
 				Title = res.Value.title,
-				Target = res.Value.target,
+				Target = normalized,
 				IsLocalApp = isLocal
 			});
 			SaveProfileConfig(_currentProfile);
@@ -1121,11 +1320,13 @@ namespace AugurWorkspace
 			if (_currentProfile == null) return;
 			var res = PromptBookmark("Редактировать закладку", item.Title, item.Target);
 			if (res == null) return;
-			bool urlChanged = item.Target != res.Value.target;
+
+			var (normalized, isLocal) = NormalizeTarget(res.Value.target);
+			bool urlChanged = item.Target != normalized;
 			item.Title = res.Value.title;
-			item.Target = res.Value.target;
-			item.IsLocalApp = !res.Value.target.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-			!res.Value.target.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+			item.Target = normalized;
+			item.IsLocalApp = isLocal;
+
 			if (urlChanged)
 			{
 				try { File.Delete(GetFaviconCachePath(item)); } catch { }
@@ -1163,6 +1364,7 @@ namespace AugurWorkspace
 				BackColor = BgSidebar,
 				ForeColor = Color.White
 			};
+			ApplyDarkTitleBar(prompt.Handle);
 			Label textLabel = new Label() { Left = 15, Top = 15, Width = 370, Text = text };
 			TextBox textBox = new TextBox() { Left = 15, Top = 42, Width = 370, Text = defaultVal, BackColor = BgRowNormal, ForeColor = Color.White };
 			Button confirmation = new Button() { Text = "ОК", Left = 285, Width = 100, Top = 78, DialogResult = DialogResult.OK, FlatStyle = FlatStyle.Flat, BackColor = BgRowActive, ForeColor = Color.White };
@@ -1185,6 +1387,7 @@ namespace AugurWorkspace
 				BackColor = BgSidebar,
 				ForeColor = Color.White
 			};
+			ApplyDarkTitleBar(prompt.Handle);
 			Label lblTitle = new Label() { Left = 15, Top = 15, Width = 430, Text = "Название закладки:" };
 			TextBox txtTitle = new TextBox() { Left = 15, Top = 38, Width = 430, Text = defaultTitle, BackColor = BgRowNormal, ForeColor = Color.White };
 			Label lblTarget = new Label() { Left = 15, Top = 75, Width = 430, Text = "Ссылка (https://...) или путь к локальному файлу (.exe, .xlsx):" };
@@ -1216,5 +1419,38 @@ namespace AugurWorkspace
 			}
 		}
 	}
+
+	public class DarkMenuRenderer : ToolStripProfessionalRenderer
+	{
+		public DarkMenuRenderer() : base(new DarkMenuColors()) { }
+
+		protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+		{
+			e.TextColor = e.Item.Selected ? Color.FromArgb(18, 19, 22) : Color.Gainsboro;
+			base.OnRenderItemText(e);
+		}
+
+		protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+		{
+			e.ArrowColor = e.Item != null && e.Item.Selected ? Color.FromArgb(18, 19, 22) : Color.Gainsboro;
+			base.OnRenderArrow(e);
+		}
+	}
+
+	public class DarkMenuColors : ProfessionalColorTable
+	{
+		public override Color MenuItemSelected => Color.FromArgb(228, 230, 235);
+		public override Color MenuItemSelectedGradientBegin => Color.FromArgb(228, 230, 235);
+		public override Color MenuItemSelectedGradientEnd => Color.FromArgb(228, 230, 235);
+		public override Color MenuItemBorder => Color.Transparent;
+		public override Color MenuBorder => Color.FromArgb(55, 58, 66);
+		public override Color ToolStripDropDownBackground => Color.FromArgb(30, 31, 34);
+		public override Color ImageMarginGradientBegin => Color.FromArgb(30, 31, 34);
+		public override Color ImageMarginGradientMiddle => Color.FromArgb(30, 31, 34);
+		public override Color ImageMarginGradientEnd => Color.FromArgb(30, 31, 34);
+		public override Color SeparatorDark => Color.FromArgb(55, 58, 66);
+		public override Color SeparatorLight => Color.Transparent;
+	}
+
 
 }
