@@ -61,6 +61,34 @@ namespace AugurWorkspace
 		private static readonly Color BgHoverBright = Color.FromArgb(228, 230, 235);
 		private static readonly Color TextDarkHover = Color.FromArgb(18, 19, 22);
 
+		// Блокировка рекламы
+		private Button _btnAdBlock = null!;
+		private bool _isAdBlockEnabled = true;
+
+		private static readonly string[] AdBlockDomains =
+		{
+			"an.yandex.ru",
+			"yandex.ru/ads",
+			"yastatic.net/pcode",
+			"ads.adfox.ru",
+			"googlesyndication.com",
+			"doubleclick.net",
+			"googleadservices.com",
+			"adservice.google.",
+			"ad.mail.ru",
+			"://my.com",
+			"mc.yandex.ru",
+			"top-fwz1.mail.ru",
+			"criteo.com",
+			"taboola.com",
+			"outbrain.com",
+			"mgid.com",
+			"marketgid.com",
+			"rtb.",
+			"admixer.net",
+			"betweenx.com"
+		};
+
 		private static void ApplyDarkTitleBar(IntPtr handle)
 		{
 			try
@@ -237,6 +265,32 @@ namespace AugurWorkspace
 						await SwitchProfileAsync(selected);
 				}
 			};
+
+			_btnAdBlock = new Button
+			{
+				Text = "🛡",
+				Width = 36,
+				Dock = DockStyle.Right,
+				FlatStyle = FlatStyle.Flat,
+				BackColor = BgRowNormal,
+				ForeColor = Color.Gainsboro,
+				Font = new Font("Segoe UI Emoji", 10f),
+				Cursor = Cursors.Hand
+			};
+			_btnAdBlock.FlatAppearance.BorderSize = 0;
+			ApplyContrastHover(_btnAdBlock, BgRowNormal, Color.Gainsboro);
+
+			// Рисуем тонкую цветную рамку (зелёная = ВКЛ, красная = ВЫКЛ)
+			_btnAdBlock.Paint += (s, e) =>
+			{
+				Color borderColor = _isAdBlockEnabled ? Color.FromArgb(60, 180, 90) : Color.FromArgb(210, 65, 65);
+				using var pen = new Pen(borderColor, 1.5f);
+				e.Graphics.DrawRectangle(pen, 0.75f, 0.75f, _btnAdBlock.Width - 1.5f, _btnAdBlock.Height - 1.5f);
+			};
+
+			_btnAdBlock.Click += (s, e) => ToggleAdBlock();
+			_toolTip.SetToolTip(_btnAdBlock, "Блокировка рекламы: ВКЛ (нажмите для переключения)");
+
 
 			sideTop.Controls.Add(_profileSwitcher);
 			sideTop.Controls.Add(btnToggle);
@@ -447,13 +501,17 @@ namespace AugurWorkspace
 
 			var spacer1 = new Panel { Width = 8, Dock = DockStyle.Right, BackColor = Color.Transparent };
 			var spacer2 = new Panel { Width = 4, Dock = DockStyle.Right, BackColor = Color.Transparent };
+			var spacer3 = new Panel { Width = 4, Dock = DockStyle.Right, BackColor = Color.Transparent };
 
 			topBarPanel.Controls.Add(_addressBar);
-			topBarPanel.Controls.Add(spacer1);               // Пробел 8px после строки
+			topBarPanel.Controls.Add(spacer1);
+			topBarPanel.Controls.Add(_btnAdBlock);			 // Адблок
+			topBarPanel.Controls.Add(spacer2);               // Пробел 8px после строки
 			topBarPanel.Controls.Add(_btnSaveAsNewBookmark); // Звезда
-			topBarPanel.Controls.Add(spacer2);               // Пробел 4px между звездой и дискеткой
-			topBarPanel.Controls.Add(_btnSaveBaseUrl);		 // Дискета
+			topBarPanel.Controls.Add(spacer3);               // Пробел 4px между звездой и дискеткой
+			topBarPanel.Controls.Add(_btnSaveBaseUrl);       // Дискета
 			topBarPanel.Controls.Add(_topTitleLabel);
+
 
 			_contentPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(18, 18, 20) };
 			rightArea.Controls.Add(_contentPanel);
@@ -951,6 +1009,43 @@ namespace AugurWorkspace
 				webView = new WebView2 { Dock = DockStyle.Fill };
 				_contentPanel.Controls.Add(webView);
 				await webView.EnsureCoreWebView2Async(_webEnv);
+				// Перехват сетевых запросов для блокировки рекламы (управляется кнопкой _btnAdBlock)
+				webView.CoreWebView2.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+				webView.CoreWebView2.WebResourceRequested += (s, e) =>
+				{
+					if (!_isAdBlockEnabled) return;
+
+					string uri = e.Request.Uri;
+					if (AdBlockDomains.Any(domain => uri.Contains(domain, StringComparison.OrdinalIgnoreCase)))
+					{
+						e.Response = _webEnv!.CreateWebResourceResponse(null, 403, "Blocked", "");
+					}
+				};
+
+				// Косметическая очистка пустых рамок от вырезанных баннеров
+				await webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(@"
+				 window.__augurAdBlock = true;
+				 const style = document.createElement('style');
+				 style.id = 'augur-adblock-style';
+				 style.textContent = `
+				 ins.adsbygoogle, [id^='yandex_rtb'], [class*='yandex_rtb'], 
+				 iframe[src*='doubleclick'], iframe[src*='yandex.ru/ads'], 
+				 div[id*='adfox'] { display: none !important; }`;
+				 document.documentElement.appendChild(style);");
+
+				// При старте навигации включаем или удаляем косметический CSS в зависимости от состояния кнопки
+				webView.CoreWebView2.NavigationStarting += async (s, e) =>
+				{
+					try
+					{
+						if (!_isAdBlockEnabled)
+						{
+							await webView.CoreWebView2.ExecuteScriptAsync("document.getElementById('augur-adblock-style')?.remove();");
+						}
+					}
+					catch { }
+				};
+
 				webView.CoreWebView2.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Dark;
 				// Подхватываем и сохраняем иконку сайта напрямую из открытой вкладки WebView2
 				webView.CoreWebView2.FaviconChanged += async (s, e) =>
@@ -1148,6 +1243,8 @@ namespace AugurWorkspace
 				IsLocalApp = false
 			};
 
+
+
 			// Вставляем ровно под текущей закладкой
 			_currentProfile.Bookmarks.Insert(currentIndex + 1, newItem);
 			SaveProfileConfig(_currentProfile);
@@ -1164,6 +1261,20 @@ namespace AugurWorkspace
 			_btnSaveAsNewBookmark.Text = "☆";
 		}
 
+		private void ToggleAdBlock()
+		{
+			_isAdBlockEnabled = !_isAdBlockEnabled;
+			_btnAdBlock.Invalidate(); // Перерисовываем цвет рамки (зелёная / красная)
+
+			string stateText = _isAdBlockEnabled ? "ВКЛ" : "ВЫКЛ";
+			_toolTip.SetToolTip(_btnAdBlock, $"Блокировка рекламы: {stateText} (нажмите для переключения)");
+
+			// Если сейчас открыта активная веб-вкладка — перезагружаем её
+			if (_activeTabId != null && _loadedTabs.TryGetValue(_activeTabId, out var activeWebView) && activeWebView.CoreWebView2 != null)
+			{
+				activeWebView.CoreWebView2.Reload();
+			}
+		}
 
 		private void UpdateActiveTabHighlight()
 		{
